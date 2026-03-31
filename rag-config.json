@@ -1,0 +1,12 @@
+{
+  "ollamaUrl": "http://localhost:11434",
+  "embeddingModel": "nomic-embed-text",
+  "ssotRoot": "~/.openclaw/workspace/resonantos-alpha/ssot",
+  "dbPath": "~/.openclaw/workspace/r-rag/rag.db",
+  "chunkSize": 500,
+  "chunkOverlap": 50,
+  "topK": 5,
+  "minScore": 0.65,
+  "tokenBudget": 2000,
+  "enabled": true
+}
