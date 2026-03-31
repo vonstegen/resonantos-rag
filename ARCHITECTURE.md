@@ -117,9 +117,19 @@ Qdrant integration is a natural future upgrade path.
 - 768-dimensional embeddings — good quality for document retrieval
 - Fully local, no API key required
 
-### Why not OpenClaw's built-in memory_search?
+### Why not the ResonantOS built-in search?
 
-`memory_search` is a core OpenClaw tool but its embedding config is not exposed in `openclaw.json` or `.env`. After review of the OpenClaw source and ResonantOS codebase, there is no public API to configure its embedding provider. This layer therefore implements its own embedding pipeline using the same model.
+ResonantOS ships two search systems:
+
+1. **Memory Bridge MCP** (`~/.openclaw/memory/main.sqlite`) — SQLite FTS5 full-text search exposed via MCP protocol to external clients (Claude Desktop, Cursor, Windsurf). Finds chunks by keyword/phrase matching.
+
+2. **resonantos-rag** (this project) — SQLite + Ollama vector embeddings. Finds chunks by *meaning*, not keywords. Complementary to FTS5, not a replacement.
+
+These serve different use cases:
+- FTS5: "find all chunks containing the word *arbitrage*"
+- RAG: "find chunks relevant to *pricing strategy under uncertainty*"
+
+Additionally, the MCP server (`mcp-server/src/index.js`) contains hardcoded macOS paths (`/Users/augmentor/`) that break on Linux installs. This has been patched on Lumen — a fix has been reported upstream.
 
 ---
 
