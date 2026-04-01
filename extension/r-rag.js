@@ -1,5 +1,7 @@
 /**
  * r-rag.js — ResonantOS RAG Extension for OpenClaw
+ * @version 0.2.0
+ * @date 2026-03-31
  *
  * Hooks into the OpenClaw extension pipeline to inject semantically
  * relevant SSoT chunks into the agent's context window.
@@ -7,33 +9,35 @@
  * Runs AFTER r-awareness.js — enriches keyword-triggered doc loading
  * with precise semantic chunk injection.
  *
+ * Hook: before_agent_start — query RAG, inject into systemPrompt
+ *
  * Install location: ~/.openclaw/agents/main/agent/extensions/r-rag.js
  */
 
-import { execSync } from "child_process";
-import { existsSync, readFileSync } from "fs";
-import { join, resolve } from "path";
-import { homedir } from "os";
+const { execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
 // ─────────────────────────────────────────────
 // Config
 // ─────────────────────────────────────────────
 
-const CONFIG_PATH = join(homedir(), ".openclaw", "workspace", "r-rag", "config.json");
+const CONFIG_PATH = path.join(os.homedir(), ".openclaw", "workspace", "r-rag", "config.json");
 const DEFAULT_CONFIG = {
   ollamaUrl: "http://localhost:11434",
   embeddingModel: "nomic-embed-text",
-  dbPath: join(homedir(), ".openclaw", "workspace", "r-rag", "rag.db"),
+  dbPath: path.join(os.homedir(), ".openclaw", "workspace", "r-rag", "rag.db"),
   topK: 5,
-  minScore: 0.65,
-  tokenBudget: 2000,   // max tokens RAG may consume from the context budget
+  minScore: 0.50,
+  tokenBudget: 2000,
   enabled: true,
 };
 
 function loadConfig() {
   try {
-    if (existsSync(CONFIG_PATH)) {
-      const raw = readFileSync(CONFIG_PATH, "utf8");
+    if (fs.existsSync(CONFIG_PATH)) {
+      const raw = fs.readFileSync(CONFIG_PATH, "utf8");
       return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
     }
   } catch (e) {
@@ -51,13 +55,12 @@ function loadConfig() {
  * Returns [] on any error — RAG failure should never break the agent.
  */
 function runQuery(queryText, config) {
-  const queryScript = resolve(homedir(), "resonantos-rag", "query", "rag-query.py");
-  const venvPython = resolve(homedir(), "resonantos-rag", "venv", "bin", "python3");
+  const queryScript = path.resolve(os.homedir(), "resonantos-rag", "query", "rag-query.py");
+  const venvPython = path.resolve(os.homedir(), "resonantos-rag", "venv", "bin", "python3");
 
-  // Fall back to system python3 if venv not found
-  const python = existsSync(venvPython) ? venvPython : "python3";
+  const python = fs.existsSync(venvPython) ? venvPython : "python3";
 
-  if (!existsSync(queryScript)) {
+  if (!fs.existsSync(queryScript)) {
     console.warn("[r-rag] Query script not found:", queryScript);
     return [];
   }
@@ -68,6 +71,7 @@ function runQuery(queryText, config) {
       queryScript,
       JSON.stringify(queryText),
       "--json",
+      "--config", CONFIG_PATH,
       "--top", String(config.topK),
       "--min-score", String(config.minScore),
     ];
@@ -96,13 +100,18 @@ function runQuery(queryText, config) {
 function formatInjection(results, tokenBudget) {
   if (!results || results.length === 0) return null;
 
-  const lines = ["── RAG Context (semantic retrieval) ──"];
-  let approxTokens = 10; // header
+  const lines = ["\n── RAG Context (semantic retrieval) ──"];
+  let approxTokens = 10;
 
   for (const r of results) {
-    const header = `[${r.source_name} · ${r.doc_layer} · chunk ${r.chunk_index} · score ${r.score}]`;
-    const body = r.chunk_text;
-    const chunkTokens = Math.ceil((header.length + body.length) / 4); // rough estimate
+    const sourceName = r.source_name || r.source_path || "unknown";
+    const layer = r.doc_layer || "?";
+    const chunkIdx = r.chunk_index != null ? r.chunk_index : "?";
+    const score = typeof r.score === "number" ? r.score.toFixed(4) : "?";
+    const body = r.chunk_text || "";
+
+    const header = `[${sourceName} · ${layer} · chunk ${chunkIdx} · score ${score}]`;
+    const chunkTokens = Math.ceil((header.length + body.length) / 4);
 
     if (approxTokens + chunkTokens > tokenBudget) break;
 
@@ -117,53 +126,47 @@ function formatInjection(results, tokenBudget) {
 }
 
 // ─────────────────────────────────────────────
-// OpenClaw extension hook
+// OpenClaw extension entry point
 // ─────────────────────────────────────────────
 
-/**
- * Main extension hook — called by OpenClaw on each agent turn.
- *
- * @param {object} ctx - Extension context provided by OpenClaw
- *   ctx.message      - Current user message
- *   ctx.injectBefore - Function to inject text before system prompt
- *   ctx.injectAfter  - Function to inject text after system prompt
- *   ctx.session      - Current session info
- */
-export async function onTurn(ctx) {
-  const config = loadConfig();
+module.exports = function rRagExtension(api) {
+  let initialized = false;
+  let config = { ...DEFAULT_CONFIG };
 
-  if (!config.enabled) return;
-
-  const message = ctx?.message?.text || ctx?.message || "";
-  if (!message || message.trim().length < 5) return;
-
-  try {
-    const results = runQuery(message, config);
-
-    if (!results || results.length === 0) return;
-
-    const injection = formatInjection(results, config.tokenBudget);
-    if (!injection) return;
-
-    // Inject after system prompt, before conversation history
-    if (typeof ctx.injectAfter === "function") {
-      ctx.injectAfter(injection);
-    }
-
-    console.log(`[r-rag] Injected ${results.length} chunks (query: "${message.substring(0, 50)}...")`);
-  } catch (e) {
-    // RAG failures are non-fatal — agent continues without RAG context
-    console.warn("[r-rag] Extension error (non-fatal):", e.message);
+  function init() {
+    if (initialized) return;
+    initialized = true;
+    config = loadConfig();
+    console.log("[r-rag] R-RAG v0.2.0 init", {
+      enabled: config.enabled,
+      db: config.dbPath,
+      topK: config.topK,
+      minScore: config.minScore,
+      tokenBudget: config.tokenBudget,
+    });
   }
-}
 
-/**
- * Extension metadata — used by OpenClaw's extension registry.
- */
-export const meta = {
-  name: "r-rag",
-  version: "0.1.0",
-  description: "ResonantOS RAG Layer 4 — semantic SSoT chunk injection",
-  author: "vonstegen",
-  runsAfter: ["r-awareness"],
+  api.on("before_agent_start", async (event, ctx) => {
+    try {
+      init();
+      if (!config.enabled) return;
+
+      const prompt = event.prompt || "";
+      if (!prompt || prompt.trim().length < 5) return;
+
+      const systemPrompt = event.systemPrompt || "";
+
+      const results = runQuery(prompt, config);
+      if (!results || results.length === 0) return;
+
+      const injection = formatInjection(results, config.tokenBudget);
+      if (!injection) return;
+
+      console.log(`[r-rag] Injected ${results.length} chunks (query: "${prompt.substring(0, 50)}...")`);
+      return { systemPrompt: systemPrompt + injection };
+    } catch (e) {
+      // RAG failures are non-fatal — agent continues without RAG context
+      console.warn("[r-rag] Extension error (non-fatal):", e.message);
+    }
+  });
 };
